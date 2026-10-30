@@ -42,4 +42,4 @@ The system combines unique QR verification with live face matching to help preve
 
 ---
 
-**Developed at Syed Dayyan Noor.**
+**Developed by Syed Dayyan Noor.**
