@@ -42,4 +42,4 @@ The system combines unique QR verification with live face matching to help preve
 
 ---
 
-**Developed at MATZ Solutions.**
+**Developed at Syed Dayyan Noor.**
