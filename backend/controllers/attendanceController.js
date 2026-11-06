@@ -1,7 +1,7 @@
 
 const pool = require("../config/db");
 
-const FACE_MATCH_THRESHOLD = 0.7;
+const FACE_MATCH_THRESHOLD = 0.45;
 
 function getPakistanDate() {
   const parts = new Intl.DateTimeFormat("en-CA", {

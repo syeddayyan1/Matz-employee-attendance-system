@@ -11,7 +11,7 @@ const MODEL_URL =
 
 const FACE_RETRY_MS = 300;
 const RESULT_DISPLAY_MS = 2000;
-const REQUIRED_LIVE_FRAMES = 8;
+const REQUIRED_LIVE_FRAMES = 5;
 
 export default function KioskPage() {
   const scannerRef = useRef(null);
