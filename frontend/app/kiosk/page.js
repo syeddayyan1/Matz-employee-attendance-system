@@ -2,7 +2,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Html5Qrcode } from "html5-qrcode";
 import { FaceLiveness } from "@solankivishal/face-liveness-web";
 import { markKioskAttendance } from "@/api/client/employee";
 
@@ -14,35 +13,47 @@ const RESULT_DISPLAY_MS = 2000;
 const REQUIRED_LIVE_FRAMES = 5;
 
 export default function KioskPage() {
-  const scannerRef = useRef(null);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+
   const faceApiRef = useRef(null);
   const livenessRef = useRef(null);
+  const modelsPromiseRef = useRef(null);
+
   const loopTimerRef = useRef(null);
   const resultTimerRef = useRef(null);
 
   const mountedRef = useRef(false);
-  const scanningRef = useRef(false);
+  const sessionRef = useRef(0);
+  const cameraStartingRef = useRef(false);
   const loopRunningRef = useRef(false);
   const detectingRef = useRef(false);
   const attendanceBusyRef = useRef(false);
-  const qrTokenRef = useRef("");
+
   const liveFramesRef = useRef(0);
   const detectLoopRef = useRef(null);
 
-  const [qrToken, setQrToken] = useState("");
   const [faceDescriptor, setFaceDescriptor] = useState(null);
   const [livenessVerified, setLivenessVerified] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
-  const [message, setMessage] = useState("");
+
+  const [message, setMessage] = useState(
+    "Starting face verification..."
+  );
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+
   const [resultType, setResultType] = useState("");
   const [resultMessage, setResultMessage] = useState("");
   const [resultAction, setResultAction] = useState("");
+  const [resultEmployeeName, setResultEmployeeName] = useState("");
 
+  // Stop camera safely
   const stopFaceCamera = useCallback(() => {
+    // Invalidate any camera startup still in progress
+    sessionRef.current += 1;
+
+    cameraStartingRef.current = false;
     loopRunningRef.current = false;
     detectingRef.current = false;
 
@@ -52,13 +63,18 @@ export default function KioskPage() {
     }
 
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current.getTracks().forEach((track) => {
+        track.stop();
+      });
+
       streamRef.current = null;
     }
 
-    if (videoRef.current) {
-      videoRef.current.pause();
-      videoRef.current.srcObject = null;
+    const video = videoRef.current;
+
+    if (video) {
+      video.pause();
+      video.srcObject = null;
     }
 
     if (mountedRef.current) {
@@ -66,133 +82,58 @@ export default function KioskPage() {
     }
   }, []);
 
-  const stopScanner = useCallback(async () => {
-    const scanner = scannerRef.current;
-    if (!scanner) return;
-
-    scannerRef.current = null;
-
-    try {
-      if (scanner.isScanning) {
-        await scanner.stop();
-      }
-    } catch (err) {
-      console.warn("QR scanner stop:", err?.message);
-    }
-
-    try {
-      scanner.clear();
-    } catch (err) {
-      console.warn("QR scanner clear:", err?.message);
-    }
-  }, []);
-
+  // Load face recognition and liveness models once
   const loadModels = useCallback(async () => {
-    if (!faceApiRef.current) {
-      const faceapi = await import("face-api.js");
-
-      await Promise.all([
-        faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-        faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-        faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
-      ]);
-
-      faceApiRef.current = faceapi;
+    if (faceApiRef.current && livenessRef.current) {
+      return faceApiRef.current;
     }
 
-    if (!livenessRef.current) {
-      livenessRef.current = await FaceLiveness.create();
+    if (!modelsPromiseRef.current) {
+      modelsPromiseRef.current = (async () => {
+        const faceapi = await import("face-api.js");
+
+        await Promise.all([
+          faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+          faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+          faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+        ]);
+
+        faceApiRef.current = faceapi;
+
+        if (!livenessRef.current) {
+          livenessRef.current = await FaceLiveness.create();
+        }
+
+        return faceapi;
+      })().catch((err) => {
+        modelsPromiseRef.current = null;
+        throw err;
+      });
     }
 
-    return faceApiRef.current;
+    return modelsPromiseRef.current;
   }, []);
 
-  const startScanner = useCallback(async () => {
-    if (
-      !mountedRef.current ||
-      scanningRef.current ||
-      scannerRef.current ||
-      qrTokenRef.current
-    ) {
-      return;
-    }
-
-    const reader = document.getElementById("kiosk-qr-reader");
-    if (!reader) return;
-
-    scanningRef.current = true;
-
-    const scanner = new Html5Qrcode("kiosk-qr-reader");
-    scannerRef.current = scanner;
-
-    try {
-      await scanner.start(
-        { facingMode: "environment" },
-        {
-          fps: 10,
-          qrbox: { width: 230, height: 230 },
-          aspectRatio: 1,
-        },
-        async (decodedText) => {
-          if (!mountedRef.current || qrTokenRef.current) return;
-
-          let token = decodedText.trim();
-
-          try {
-            const url = new URL(decodedText.trim());
-            token =
-              url.searchParams.get("qrToken") ||
-              url.searchParams.get("token") ||
-              decodedText.trim();
-          } catch {
-            // QR contains a plain token.
-          }
-
-          if (!token) {
-            setError("Invalid employee QR code.");
-            return;
-          }
-
-          qrTokenRef.current = token;
-          setQrToken(token);
-          setError("");
-          setMessage("QR scanned. Loading face verification...");
-          setFaceDescriptor(null);
-          setLivenessVerified(false);
-          liveFramesRef.current = 0;
-
-          await stopScanner();
-        }
-      );
-    } catch (err) {
-      console.error("QR camera:", err);
-
-      if (mountedRef.current) {
-        setError(
-          "Unable to start QR camera. Allow camera access and use localhost or HTTPS."
-        );
-      }
-
-      if (scannerRef.current === scanner) {
-        scannerRef.current = null;
-      }
-
-      try {
-        scanner.clear();
-      } catch {}
-    } finally {
-      scanningRef.current = false;
-    }
-  }, [stopScanner]);
-
+  // Start camera automatically
   const startFaceCamera = useCallback(async () => {
     if (
       !mountedRef.current ||
-      !qrTokenRef.current ||
+      cameraStartingRef.current ||
       streamRef.current
     ) {
       return;
     }
+
+    cameraStartingRef.current = true;
+
+    const currentSession = ++sessionRef.current;
+
+    const isCurrentSession = () => {
+      return (
+        mountedRef.current &&
+        sessionRef.current === currentSession
+      );
+    };
 
     setLoading(true);
     setError("");
@@ -201,7 +142,9 @@ export default function KioskPage() {
     try {
       const faceapi = await loadModels();
 
-      if (!mountedRef.current || !qrTokenRef.current) return;
+      if (!isCurrentSession()) return;
+
+      setMessage("Opening camera...");
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
@@ -212,30 +155,83 @@ export default function KioskPage() {
         },
       });
 
-      if (!mountedRef.current || !qrTokenRef.current) {
+      // Stop an outdated camera request
+      if (!isCurrentSession()) {
         stream.getTracks().forEach((track) => track.stop());
         return;
       }
 
+      const video = videoRef.current;
+
+      if (!video) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new Error("Face camera is unavailable.");
+      }
+
       streamRef.current = stream;
 
-      const video = videoRef.current;
-      if (!video) throw new Error("Face camera is unavailable.");
-
+      // Assign the camera stream only once
       video.srcObject = stream;
-      await video.play();
 
-      if (!mountedRef.current) return;
+      // Wait for video metadata before playback
+      if (video.readyState < 1) {
+        await new Promise((resolve, reject) => {
+          const handleLoaded = () => {
+            cleanup();
+            resolve();
+          };
+
+          const handleError = () => {
+            cleanup();
+            reject(new Error("Unable to load camera video."));
+          };
+
+          const cleanup = () => {
+            video.removeEventListener("loadedmetadata", handleLoaded);
+            video.removeEventListener("error", handleError);
+          };
+
+          video.addEventListener("loadedmetadata", handleLoaded, {
+            once: true,
+          });
+
+          video.addEventListener("error", handleError, {
+            once: true,
+          });
+        });
+      }
+
+      if (!isCurrentSession() || video.srcObject !== stream) {
+        return;
+      }
+
+      // Play video once; ignore interruption caused by cleanup
+      try {
+        await video.play();
+      } catch (playError) {
+        if (
+          playError?.name === "AbortError" &&
+          !isCurrentSession()
+        ) {
+          return;
+        }
+
+        throw playError;
+      }
+
+      if (!isCurrentSession()) return;
 
       setCameraReady(true);
       setMessage("Look at the camera. Checking for a live face...");
+
       liveFramesRef.current = 0;
       loopRunningRef.current = true;
 
+      // Face and liveness detection loop
       const detectFace = async () => {
         if (
           !loopRunningRef.current ||
-          !mountedRef.current ||
+          !isCurrentSession() ||
           detectingRef.current
         ) {
           return;
@@ -259,18 +255,25 @@ export default function KioskPage() {
         detectingRef.current = true;
 
         try {
+          // Check liveness
           const faces = await livenessRef.current.detect(currentVideo);
-          const liveFace = faces?.[0];
 
-          if (!loopRunningRef.current || !mountedRef.current) return;
+          if (!loopRunningRef.current || !isCurrentSession()) {
+            return;
+          }
+
+          const liveFace = faces?.[0];
 
           if (!liveFace || !liveFace.isLive) {
             liveFramesRef.current = 0;
+
             setFaceDescriptor(null);
             setLivenessVerified(false);
+
             setMessage(
               "Live face not verified. Look directly at the camera."
             );
+
             return;
           }
 
@@ -279,12 +282,15 @@ export default function KioskPage() {
           if (liveFramesRef.current < REQUIRED_LIVE_FRAMES) {
             setFaceDescriptor(null);
             setLivenessVerified(false);
+
             setMessage(
               `Checking live face... ${liveFramesRef.current}/${REQUIRED_LIVE_FRAMES}`
             );
+
             return;
           }
 
+          // Generate face descriptor
           const result = await faceapi
             .detectSingleFace(
               currentVideo,
@@ -296,7 +302,9 @@ export default function KioskPage() {
             .withFaceLandmarks()
             .withFaceDescriptor();
 
-          if (!loopRunningRef.current || !mountedRef.current) return;
+          if (!loopRunningRef.current || !isCurrentSession()) {
+            return;
+          }
 
           if (!result) {
             setFaceDescriptor(null);
@@ -317,6 +325,7 @@ export default function KioskPage() {
             return;
           }
 
+          // Face verification completed
           loopRunningRef.current = false;
 
           if (loopTimerRef.current) {
@@ -331,7 +340,7 @@ export default function KioskPage() {
         } catch (err) {
           console.error("Face/liveness detection:", err);
 
-          if (mountedRef.current) {
+          if (isCurrentSession()) {
             setMessage(
               "Face verification could not complete. Retrying..."
             );
@@ -339,7 +348,10 @@ export default function KioskPage() {
         } finally {
           detectingRef.current = false;
 
-          if (loopRunningRef.current && mountedRef.current) {
+          if (
+            loopRunningRef.current &&
+            isCurrentSession()
+          ) {
             loopTimerRef.current = window.setTimeout(
               detectFace,
               FACE_RETRY_MS
@@ -349,75 +361,50 @@ export default function KioskPage() {
       };
 
       detectLoopRef.current = detectFace;
+
       loopTimerRef.current = window.setTimeout(detectFace, 100);
     } catch (err) {
       console.error("Camera/model error:", err);
-      stopFaceCamera();
 
-      if (mountedRef.current) {
+      if (isCurrentSession()) {
+        stopFaceCamera();
+
         setError(
           err?.message ||
             "Unable to start face verification. Check camera permissions and model availability."
         );
+
+        setMessage("Camera could not be started.");
       }
     } finally {
-      if (mountedRef.current) {
+      if (isCurrentSession()) {
+        cameraStartingRef.current = false;
         setLoading(false);
       }
     }
   }, [loadModels, stopFaceCamera]);
 
+  // Camera starts automatically when kiosk opens
   useEffect(() => {
     mountedRef.current = true;
-    startScanner();
+
+    startFaceCamera();
 
     return () => {
       mountedRef.current = false;
-      loopRunningRef.current = false;
-
-      if (loopTimerRef.current) {
-        window.clearTimeout(loopTimerRef.current);
-      }
 
       if (resultTimerRef.current) {
         window.clearTimeout(resultTimerRef.current);
+        resultTimerRef.current = null;
       }
 
-      const scanner = scannerRef.current;
-      scannerRef.current = null;
-
-      if (scanner) {
-        void (async () => {
-          try {
-            if (scanner.isScanning) await scanner.stop();
-          } catch {}
-
-          try {
-            scanner.clear();
-          } catch {}
-        })();
-      }
-
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-      }
-
-      if (livenessRef.current) {
-        void livenessRef.current.dispose?.();
-        livenessRef.current = null;
-      }
+      stopFaceCamera();
     };
-  }, [startScanner]);
+  }, [startFaceCamera, stopFaceCamera]);
 
-  useEffect(() => {
-    if (qrToken && mountedRef.current && !cameraReady && !loading) {
-      startFaceCamera();
-    }
-  }, [qrToken, cameraReady, loading, startFaceCamera]);
-
+  // Show attendance result
   const showResult = useCallback(
-    (type, action, text) => {
+    (type, action, text, employeeName = "") => {
       if (!mountedRef.current) return;
 
       stopFaceCamera();
@@ -425,8 +412,11 @@ export default function KioskPage() {
       setResultType(type);
       setResultAction(action);
       setResultMessage(text);
+      setResultEmployeeName(employeeName);
+
       setFaceDescriptor(null);
       setLivenessVerified(false);
+
       setError("");
       setMessage("");
       setLoading(false);
@@ -444,11 +434,14 @@ export default function KioskPage() {
     [stopFaceCamera]
   );
 
+  // Mark DAY IN / DAY OUT attendance
   const handleAttendance = async (action) => {
     if (attendanceBusyRef.current) return;
 
-    if (!qrToken || !faceDescriptor || !livenessVerified) {
-      setError("Complete live face verification before marking attendance.");
+    if (!faceDescriptor || !livenessVerified) {
+      setError(
+        "Complete live face verification before marking attendance."
+      );
       return;
     }
 
@@ -458,13 +451,13 @@ export default function KioskPage() {
     }
 
     attendanceBusyRef.current = true;
+
     setLoading(true);
     setError("");
     setMessage(`Verifying identity and recording ${action}...`);
 
     try {
       const result = await markKioskAttendance({
-        qrToken,
         faceDescriptor,
         action,
         livenessVerified,
@@ -472,10 +465,18 @@ export default function KioskPage() {
 
       if (!mountedRef.current) return;
 
+      const employeeName =
+        result?.employeeName ||
+        result?.employee?.name ||
+        result?.name ||
+        "";
+
       showResult(
         "success",
         action,
-        result?.message || `${action} attendance recorded successfully.`
+        result?.message ||
+          `${action} attendance marked successfully.`,
+        employeeName
       );
     } catch (err) {
       if (!mountedRef.current) return;
@@ -497,13 +498,15 @@ export default function KioskPage() {
 
       setError(
         lowerMessage.includes("face")
-          ? "Face does not match this employee."
+          ? "Face does not match any registered employee."
           : serverMessage
       );
 
       setMessage("Please try the face verification again.");
+
       setFaceDescriptor(null);
       setLivenessVerified(false);
+
       liveFramesRef.current = 0;
       loopRunningRef.current = true;
 
@@ -522,338 +525,238 @@ export default function KioskPage() {
     }
   };
 
+  // Restart kiosk for next employee
   const resetKiosk = () => {
     if (attendanceBusyRef.current) return;
+
     stopFaceCamera();
     window.location.reload();
   };
 
+  return (
+    <main className="min-h-dvh w-full overflow-x-hidden bg-[#f3f8f4] flex items-center justify-center p-2 sm:p-4">
+      <div className="w-full max-w-xl">
 
-return (
-  <main className="min-h-dvh w-full overflow-x-hidden bg-[#f3f8f4] flex items-center justify-center p-2 sm:p-4">
+        {/* Brand Header */}
+        <div className="text-center mb-3">
+          <div className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-[#173f33] text-white shadow-md mb-1">
+            <span className="text-xl font-black">M</span>
+          </div>
 
-    <div className="w-full max-w-xl">
+          <h1 className="text-lg sm:text-xl font-extrabold tracking-wide text-[#173f33]">
+            MATZ SOLUTIONS
+          </h1>
 
-      {/* Brand Header */}
-      <div className="text-center mb-3">
-
-        <div className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-[#173f33] text-white shadow-md mb-1">
-          <span className="text-xl font-black">M</span>
-        </div>
-
-        <h1 className="text-lg sm:text-xl font-extrabold tracking-wide text-[#173f33]">
-          MATZ SOLUTIONS
-        </h1>
-
-        <p className="text-xs text-gray-500">
-          Attendance Management System
-        </p>
-
-      </div>
-
-      {/* Main Card */}
-      <div className="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
-
-        {/* Card Header */}
-        <div className="bg-linear-to-r from-[#173f33] to-[#236b50] px-4 py-8 text-center">
-
-          <h2 className="text-2xl font-bold text-white">
-            Attendance Management System 
-          </h2>
-
-          <p className="text-green-100 text-md mt-1">
-            Scan your ID and verify your identity
+          <p className="text-xs text-gray-500">
+            Attendance Management System
           </p>
-
         </div>
 
-        <div className="p-3 sm:p-5">
+        {/* Main Card */}
+        <div className="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
 
-          {resultType ? (
+          {/* Card Header */}
+          <div className="bg-gradient-to-r from-[#173f33] to-[#236b50] px-4 py-8 text-center">
+            <h2 className="text-2xl font-bold text-white">
+              Attendance Management System
+            </h2>
 
-            /* Result Screen */
-            <div
-              className={`rounded-xl border p-5 text-center ${
-                resultType === "success"
-                  ? "border-green-200 bg-green-50"
-                  : "border-amber-200 bg-amber-50"
-              }`}
-              role="status"
-              aria-live="polite"
-            >
+            <p className="text-green-100 text-sm mt-1">
+              Verify your identity to mark attendance
+            </p>
+          </div>
 
-              <div className={`w-12 h-12 mx-auto rounded-full flex items-center justify-center mb-2 ${
-                resultType === "success"
-                  ? "bg-green-100"
-                  : "bg-amber-100"
-              }`}>
+          <div className="p-3 sm:p-5">
 
-                <svg
-                  className={`w-7 h-7 ${
+            {resultType ? (
+              /* Result Screen */
+              <div
+                className={`rounded-xl border p-5 text-center ${
+                  resultType === "success"
+                    ? "border-green-200 bg-green-50"
+                    : "border-amber-200 bg-amber-50"
+                }`}
+                role="status"
+                aria-live="polite"
+              >
+                <div
+                  className={`w-12 h-12 mx-auto rounded-full flex items-center justify-center mb-2 ${
                     resultType === "success"
-                      ? "text-green-700"
-                      : "text-amber-700"
+                      ? "bg-green-100"
+                      : "bg-amber-100"
                   }`}
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
                 >
-                  {resultType === "success" ? (
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth="2.5"
-                      d="M5 12l4 4L19 6"
-                    />
-                  ) : (
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth="2"
-                      d="M12 8v4m0 4h.01M5 19h14a2 2 0 001.7-3L13.7 4a2 2 0 00-3.4 0L3.3 16A2 2 0 005 19z"
-                    />
-                  )}
-                </svg>
-
-              </div>
-
-              <h2 className={`text-xl font-bold ${
-                resultType === "success"
-                  ? "text-green-800"
-                  : "text-amber-800"
-              }`}>
-                {resultType === "success"
-                  ? `${resultAction} Attendance Successful!`
-                  : "Attendance Already Marked!"}
-              </h2>
-
-              <p className="mt-2 text-sm text-gray-700">
-                {resultMessage}
-              </p>
-
-              <p className="mt-3 text-xs text-gray-500">
-                Refreshing kiosk in 2 seconds...
-              </p>
-
-            </div>
-
-          ) : (
-
-            <>
-
-              {/* QR Scanner */}
-              {!qrToken && (
-
-                <div className="text-center">
-
-                  <div className="mb-3">
-
-                    <h3 className="text-xl font-bold text-gray-800">
-                      Scan Employee ID QR
-                    </h3>
-
-                    <p className="text-xs text-gray-500 mt-1">
-                      Hold your employee ID card in front of the scanner.
-                    </p>
-
-                  </div>
-
-                  <div className="mx-auto max-w-[300px] bg-[#f8faf8] border border-gray-200 rounded-xl p-2 overflow-hidden">
-
-                    <div
-                      id="kiosk-qr-reader"
-                      className="w-full overflow-hidden rounded-lg"
-                    />
-
-                  </div>
-
-                </div>
-
-              )}
-
-              {/* Face Verification */}
-              {qrToken && (
-
-                <>
-
-                  <div className="flex items-center justify-center gap-2 rounded-lg border border-green-200 bg-green-50 p-2 mb-3">
-
-                    <svg
-                      className="w-4 h-4 text-green-700"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
+                  <svg
+                    className={`w-7 h-7 ${
+                      resultType === "success"
+                        ? "text-green-700"
+                        : "text-amber-700"
+                    }`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    {resultType === "success" ? (
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth="2.5"
+                        d="M5 12l4 4L19 6"
+                      />
+                    ) : (
                       <path
                         strokeLinecap="round"
                         strokeLinejoin="round"
                         strokeWidth="2"
-                        d="M5 13l4 4L19 7"
+                        d="M12 8v4m0 4h.01M5 19h14a2 2 0 001.7-3L13.7 4a2 2 0 00-3.4 0L3.3 16A2 2 0 005 19z"
                       />
-                    </svg>
-
-                    <span className="text-sm font-semibold text-green-800">
-                      Employee QR Scanned
-                    </span>
-
-                  </div>
-
-                  <div className="text-center mb-2">
-
-                    <h3 className="text-base font-bold text-gray-800">
-                      Face Verification
-                    </h3>
-
-                    <p className="text-xs text-gray-500 mt-1">
-                      Look directly at the camera.
-                    </p>
-
-                  </div>
-
-                  {/* Compact Face Camera */}
-                  <div
-                    className="relative mx-auto overflow-hidden rounded-xl bg-gray-900 border-2 border-[#edf5ef]"
-                    style={{
-                      height: "clamp(145px, 32dvh, 300px)",
-                      maxWidth: "420px"
-                    }}
-                  >
-
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      muted
-                      playsInline
-                      className="w-full h-full object-cover"
-                    />
-
-                    {!cameraReady && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-gray-900/80">
-                        <p className="text-white text-sm font-medium">
-                          Starting camera...
-                        </p>
-                      </div>
                     )}
+                  </svg>
+                </div>
 
-                    {faceDescriptor && livenessVerified && (
-                      <div className="absolute top-2 right-2 bg-green-600 text-white text-xs font-bold px-3 py-1.5 rounded-full shadow">
-                        Verified
-                      </div>
-                    )}
+                <h2
+                  className={`text-xl font-bold ${
+                    resultType === "success"
+                      ? "text-green-800"
+                      : "text-amber-800"
+                  }`}
+                >
+                  {resultType === "success"
+                    ? `${resultAction} Attendance Successful!`
+                    : "Attendance Already Marked!"}
+                </h2>
 
-                  </div>
+                {resultType === "success" && resultEmployeeName && (
+                  <p className="mt-2 text-lg font-bold text-[#173f33]">
+                    Welcome, {resultEmployeeName}!
+                  </p>
+                )}
 
-                  {/* Status */}
-                  <div
-                    className={`mt-3 rounded-lg border p-2 text-center text-xs sm:text-sm font-medium ${
-                      error
-                        ? "border-red-200 bg-red-50 text-red-700"
-                        : faceDescriptor && livenessVerified
-                          ? "border-green-200 bg-green-50 text-green-800"
-                          : "border-gray-200 bg-gray-50 text-gray-700"
-                    }`}
-                    role={error ? "alert" : "status"}
-                    aria-live="polite"
-                  >
+                <p className="mt-2 text-sm text-gray-700">
+                  {resultMessage}
+                </p>
 
-                    {loading
-                      ? "Please wait..."
-                      : error
-                        ? error
-                        : faceDescriptor && livenessVerified
-                          ? "Live face verification passed. Select IN or OUT."
-                          : message || "Looking for a live face..."}
+                {resultType === "success" && (
+                  <p className="mt-1 text-sm font-medium text-green-800">
+                    Your attendance has been marked successfully.
+                  </p>
+                )}
 
-                  </div>
+                <p className="mt-3 text-xs text-gray-500">
+                  Refreshing kiosk in 2 seconds...
+                </p>
+              </div>
+            ) : (
+              <>
+                {/* Face Verification Heading */}
+                <div className="text-center mb-3">
+                  <h3 className="text-xl font-bold text-gray-800">
+                    Face Verification
+                  </h3>
 
-                  {/* Attendance Buttons */}
-                  <div className="mt-3">
+                  <p className="text-xs text-gray-500 mt-1">
+                    Look directly at the camera.
+                  </p>
+                </div>
 
-                    <div className="grid grid-cols-2 gap-3">
+                {/* Face Camera */}
+                <div
+                  className="relative mx-auto overflow-hidden rounded-xl bg-gray-900 border-2 border-[#edf5ef]"
+                  style={{
+                    height: "clamp(180px, 38dvh, 320px)",
+                    maxWidth: "420px",
+                  }}
+                >
+                  <video
+                    ref={videoRef}
+                    muted
+                    playsInline
+                    className="w-full h-full object-cover"
+                  />
 
-                      <button
-                        onClick={() => handleAttendance("IN")}
-                        disabled={!faceDescriptor || !livenessVerified || loading}
-                        className="bg-[#173f33] text-white py-3 rounded-xl font-bold text-sm shadow-md hover:bg-[#236b50] active:scale-[0.98] transition-all disabled:bg-gray-300 disabled:cursor-not-allowed"
-                      >
-                        {loading ? "Please wait..." : "DAY IN"}
-                      </button>
-
-                      <button
-                        onClick={() => handleAttendance("OUT")}
-                        disabled={!faceDescriptor || !livenessVerified || loading}
-                        className="bg-[#236b50] text-white py-3 rounded-xl font-bold text-sm shadow-md hover:bg-[#173f33] active:scale-[0.98] transition-all disabled:bg-gray-300 disabled:cursor-not-allowed"
-                      >
-                        {loading ? "Please wait..." : "DAY OUT"}
-                      </button>
-
+                  {!cameraReady && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-gray-900/80">
+                      <p className="text-white text-sm font-medium">
+                        {loading ? "Starting camera..." : "Camera unavailable"}
+                      </p>
                     </div>
+                  )}
 
+                  {faceDescriptor && livenessVerified && (
+                    <div className="absolute top-2 right-2 bg-green-600 text-white text-xs font-bold px-3 py-1.5 rounded-full shadow">
+                      Verified
+                    </div>
+                  )}
+                </div>
+
+                {/* Status */}
+                <div
+                  className={`mt-3 rounded-lg border p-2 text-center text-xs sm:text-sm font-medium ${
+                    error
+                      ? "border-red-200 bg-red-50 text-red-700"
+                      : faceDescriptor && livenessVerified
+                        ? "border-green-200 bg-green-50 text-green-800"
+                        : "border-gray-200 bg-gray-50 text-gray-700"
+                  }`}
+                  role={error ? "alert" : "status"}
+                  aria-live="polite"
+                >
+                  {loading
+                    ? "Please wait..."
+                    : error
+                      ? error
+                      : faceDescriptor && livenessVerified
+                        ? "Live face verification passed. Select IN or OUT."
+                        : message || "Looking for a live face..."}
+                </div>
+
+                {/* Attendance Buttons */}
+                <div className="mt-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      onClick={() => handleAttendance("IN")}
+                      disabled={
+                        !faceDescriptor ||
+                        !livenessVerified ||
+                        loading
+                      }
+                      className="bg-[#173f33] text-white py-3 rounded-xl font-bold text-sm shadow-md hover:bg-[#236b50] active:scale-[0.98] transition-all disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    >
+                      {loading ? "Please wait..." : "DAY IN"}
+                    </button>
+
+                    <button
+                      onClick={() => handleAttendance("OUT")}
+                      disabled={
+                        !faceDescriptor ||
+                        !livenessVerified ||
+                        loading
+                      }
+                      className="bg-[#236b50] text-white py-3 rounded-xl font-bold text-sm shadow-md hover:bg-[#173f33] active:scale-[0.98] transition-all disabled:bg-gray-300 disabled:cursor-not-allowed"
+                    >
+                      {loading ? "Please wait..." : "DAY OUT"}
+                    </button>
                   </div>
+                </div>
 
-                  {/* Next Employee */}
-                  <button
-                    onClick={resetKiosk}
-                    disabled={loading}
-                    className="mt-2 w-full border border-gray-200 text-gray-600 py-2.5 rounded-xl text-sm font-semibold hover:bg-gray-50 transition-all disabled:opacity-50"
-                  >
-                    Scan Next Employee
-                  </button>
-
-                </>
-
-              )}
-
-            </>
-
-          )}
-
-          {/* QR Messages */}
-          {message && !qrToken && !resultType && (
-            <div className="mt-3 rounded-lg border border-green-200 bg-green-50 p-2 text-center text-xs text-gray-900">
-              {message}
-            </div>
-          )}
-
-          {error && !qrToken && !resultType && (
-            <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-2 text-center text-xs text-red-700">
-              {error}
-            </div>
-          )}
-
+                {/* Next Employee */}
+                <button
+                  onClick={resetKiosk}
+                  disabled={loading}
+                  className="mt-2 w-full border border-gray-200 text-gray-600 py-2.5 rounded-xl text-sm font-semibold hover:bg-gray-50 transition-all disabled:opacity-50"
+                >
+                  Scan Next Employee
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
+        {/* Footer */}
+        <p className="text-center text-[10px] text-gray-400 mt-2">
+          © {new Date().getFullYear()} MATZ SOLUTIONS. All rights reserved.
+        </p>
       </div>
-
-      {/* Footer */}
-      <p className="text-center text-[10px] text-gray-400 mt-2">
-        © {new Date().getFullYear()} MATZ SOLUTIONS. All rights reserved.
-      </p>
-
-    </div>
-
-    {/* Scanner Size Control */}
-    <style jsx global>{`
-      #kiosk-qr-reader {
-        width: 100% !important;
-      }
-
-      #kiosk-qr-reader video {
-        width: 100% !important;
-        max-height: 220px !important;
-        object-fit: cover !important;
-      }
-
-      #kiosk-qr-reader canvas {
-        max-width: 100% !important;
-      }
-
-      #kiosk-qr-reader img[alt="Info icon"] {
-        display: none !important;
-      }
-    `}</style>
-
-  </main>
-);
-
+    </main>
+  );
 }

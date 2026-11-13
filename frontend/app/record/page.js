@@ -145,7 +145,7 @@ export default function Record() {
 
                       {/* Day In */}
                       <td className="px-6 py-4 text-sm text-gray-600">
-                        {record.time}
+                       {record.login_time || record.time || "Not marked"}
                       </td>
 
                       {/* Day Out */}

@@ -1,13 +1,9 @@
 
 import api from "../axios";
 
-// Create employee — admin login required
+// Create Employee
 export const createEmployee = async (employeeData) => {
   const adminToken = localStorage.getItem("adminToken");
-
-  if (!adminToken) {
-    throw new Error("Please login as admin before adding an employee.");
-  }
 
   const response = await api.post("/employees", employeeData, {
     headers: {
@@ -18,22 +14,25 @@ export const createEmployee = async (employeeData) => {
   return response.data;
 };
 
-// Employee login
+// Employee Login
 export const loginEmployee = async (employeeData) => {
   const response = await api.post("/employees/login", employeeData);
+
   return response.data;
 };
 
-
-// Office kiosk attendance — QR + face + liveness + IN/OUT
+// Face Recognition Attendance
 export const markKioskAttendance = async ({
-  qrToken,
   faceDescriptor,
   action,
   livenessVerified,
 }) => {
-  if (!qrToken || !Array.isArray(faceDescriptor)) {
-    throw new Error("QR code and face verification are required.");
+  if (
+    !Array.isArray(faceDescriptor) ||
+    faceDescriptor.length !== 128 ||
+    !faceDescriptor.every(Number.isFinite)
+  ) {
+    throw new Error("Valid face verification is required.");
   }
 
   if (!["IN", "OUT"].includes(action)) {
@@ -45,7 +44,6 @@ export const markKioskAttendance = async ({
   }
 
   const response = await api.post("/attendance/kiosk", {
-    qrToken,
     faceDescriptor,
     action,
     livenessVerified,
@@ -54,8 +52,7 @@ export const markKioskAttendance = async ({
   return response.data;
 };
 
-
-// Get the logged-in employee's own attendance records
+// Get Employee Attendance Records
 export const getRecord = async (token) => {
   const response = await api.get("/attendance/record", {
     headers: {
